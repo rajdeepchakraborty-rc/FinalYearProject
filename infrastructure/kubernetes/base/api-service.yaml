@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: signalstream-api
+  namespace: signalstream
+  labels:
+    app: signalstream-api
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  selector:
+    app: signalstream-api

@@ -1,0 +1,3 @@
+"""
+SignalStream — MCP Server Package
+"""

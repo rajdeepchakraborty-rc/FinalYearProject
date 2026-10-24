@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: signalstream-config
+  namespace: signalstream
+data:
+  APP_ENV: "production"
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+  DATABASE_POOL_SIZE: "20"
+  DATABASE_MAX_OVERFLOW: "10"
+  KAFKA_BOOTSTRAP_SERVERS: "signalstream-kafka:9092"
+  REDIS_URL: "redis://signalstream-redis:6379/0"
+  S3_ENDPOINT_URL: "http://signalstream-minio:9000"
+  S3_BUCKET_NAME: "signalstream"
+  INFERENCE_SERVER_URL: "http://signalstream-inference:8100"
+  MCP_SERVER_URL: "http://signalstream-mcp:8200"

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: signalstream
+  labels:
+    app.kubernetes.io/name: signalstream
+    app.kubernetes.io/part-of: signalstream

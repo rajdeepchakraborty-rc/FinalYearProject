@@ -1,0 +1,345 @@
+# =============================================================
+# SignalStream — Docker Compose (Local Development)
+# =============================================================
+# Usage:
+#   docker compose up -d              # Start all services
+#   docker compose up api worker-*   # Start specific services
+#   docker compose logs -f api        # Follow API logs
+#   docker compose down -v            # Stop and remove volumes
+# =============================================================
+
+version: "3.9"
+
+x-common-env: &common-env
+  DATABASE_URL: postgresql+asyncpg://signalstream:signalstream@postgres:5432/signalstream
+  REDIS_URL: redis://redis:6379/0
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  S3_ENDPOINT_URL: http://minio:9000
+  S3_ACCESS_KEY: minioadmin
+  S3_SECRET_KEY: minioadmin
+  S3_BUCKET_NAME: signalstream
+  INFERENCE_SERVER_URL: http://inference:8100
+  MCP_SERVER_URL: http://mcp-server:8200
+  LOG_LEVEL: INFO
+  LOG_FORMAT: json
+
+x-worker-base: &worker-base
+  build:
+    context: .
+    dockerfile: infrastructure/docker/worker/Dockerfile
+  environment:
+    <<: *common-env
+  depends_on:
+    kafka:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+  networks:
+    - signalstream
+
+services:
+
+  # ─── Infrastructure ─────────────────────────────────────────
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: signalstream-postgres
+    environment:
+      POSTGRES_USER: signalstream
+      POSTGRES_PASSWORD: signalstream
+      POSTGRES_DB: signalstream
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U signalstream"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - signalstream
+
+  redis:
+    image: redis:7-alpine
+    container_name: signalstream-redis
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --save 60 1000
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - signalstream
+
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: signalstream-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_NUM_PARTITIONS: 6
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+      KAFKA_COMPRESSION_TYPE: lz4
+      CLUSTER_ID: "signalstream-local-cluster"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 > /dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    networks:
+      - signalstream
+
+  minio:
+    image: minio/minio:latest
+    container_name: signalstream-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - signalstream
+
+  # ─── Application ─────────────────────────────────────────────
+
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api/Dockerfile
+      target: development
+    container_name: signalstream-api
+    environment:
+      <<: *common-env
+      APP_DEBUG: "true"
+      APP_ENV: development
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-jwt-secret-change-in-production}
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-change-in-production}
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - signalstream
+
+  inference:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/inference/Dockerfile
+    container_name: signalstream-inference
+    environment:
+      <<: *common-env
+      APP_ENV: development
+    volumes:
+      - model_cache:/app/.model_cache
+    ports:
+      - "8100:8100"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - signalstream
+
+  mcp-server:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api/Dockerfile
+      target: development
+    container_name: signalstream-mcp
+    command: python -m services.mcp_server.main
+    environment:
+      <<: *common-env
+      APP_ENV: development
+    volumes:
+      - .:/app
+    ports:
+      - "8200:8200"
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    networks:
+      - signalstream
+
+  # ─── Workers ─────────────────────────────────────────────────
+
+  worker-normalization:
+    <<: *worker-base
+    container_name: signalstream-worker-normalization
+    command: python -m workers.normalization.main
+
+  worker-sentiment:
+    <<: *worker-base
+    container_name: signalstream-worker-sentiment
+    command: python -m workers.sentiment.main
+
+  worker-complaint:
+    <<: *worker-base
+    container_name: signalstream-worker-complaint
+    command: python -m workers.complaint.main
+
+  worker-trend:
+    <<: *worker-base
+    container_name: signalstream-worker-trend
+    command: python -m workers.trend.main
+
+  worker-crisis:
+    <<: *worker-base
+    container_name: signalstream-worker-crisis
+    command: python -m workers.crisis.main
+
+  worker-rootcause:
+    <<: *worker-base
+    container_name: signalstream-worker-rootcause
+    command: python -m workers.rootcause.main
+
+  worker-demand:
+    <<: *worker-base
+    container_name: signalstream-worker-demand
+    command: python -m workers.demand.main
+
+  worker-product:
+    <<: *worker-base
+    container_name: signalstream-worker-product
+    command: python -m workers.product.main
+
+  worker-support:
+    <<: *worker-base
+    container_name: signalstream-worker-support
+    command: python -m workers.support.main
+
+  worker-churn:
+    <<: *worker-base
+    container_name: signalstream-worker-churn
+    command: python -m workers.churn.main
+
+  worker-recommendation:
+    <<: *worker-base
+    container_name: signalstream-worker-recommendation
+    command: python -m workers.recommendation.main
+
+  worker-ticket-routing:
+    <<: *worker-base
+    container_name: signalstream-worker-ticket-routing
+    command: python -m workers.ticket_routing.main
+
+  worker-auto-resolver:
+    <<: *worker-base
+    container_name: signalstream-worker-auto-resolver
+    command: python -m workers.auto_resolver.main
+
+  # ─── Observability ───────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v2.54.0
+    container_name: signalstream-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--storage.tsdb.retention.time=15d"
+    volumes:
+      - ./infrastructure/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - signalstream
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: signalstream-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_HTTP_PORT: 3001
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infrastructure/monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./infrastructure/monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    ports:
+      - "3001:3001"
+    depends_on:
+      - prometheus
+    networks:
+      - signalstream
+
+  # ─── Gateway (optional for local dev) ──────────────────────
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: signalstream-nginx
+    volumes:
+      - ./infrastructure/nginx/conf.d:/etc/nginx/conf.d:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+    profiles:
+      - gateway
+    networks:
+      - signalstream
+
+# ─── Volumes ──────────────────────────────────────────────────
+
+volumes:
+  postgres_data:
+  redis_data:
+  kafka_data:
+  minio_data:
+  prometheus_data:
+  grafana_data:
+  model_cache:
+
+# ─── Networks ─────────────────────────────────────────────────
+
+networks:
+  signalstream:
+    driver: bridge

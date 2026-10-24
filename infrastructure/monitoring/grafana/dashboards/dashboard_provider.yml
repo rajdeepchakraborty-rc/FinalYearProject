@@ -1,0 +1,16 @@
+# =============================================================
+# SignalStream — Grafana Dashboard Provider Provisioning
+# =============================================================
+
+apiVersion: 1
+
+providers:
+  - name: "SignalStream Dashboards"
+    orgId: 1
+    folder: "SignalStream"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
